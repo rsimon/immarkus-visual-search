@@ -33,6 +33,33 @@ curl http://localhost:7771/health
 # {"status":"ok","clip_model":"ViT-B-32"}
 ```
 
+## Minimum working example (Mac / no GPU)
+
+If you just want to verify the pipeline end-to-end without a GPU, use SAM2 Small forced onto CPU. Segmentation quality is still good; the tradeoff is speed — expect several minutes per large image.
+
+Download the Small checkpoint:
+
+```bash
+curl -L -o models/sam2.1_hiera_small.pt \
+  https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_small.pt
+```
+
+Then run with both overrides:
+
+```bash
+SAM2_CHECKPOINT=models/sam2.1_hiera_small.pt \
+SAM2_DEVICE=cpu \
+uv run uvicorn server:app --host 0.0.0.0 --port 7771
+```
+
+`SAM2_DEVICE=cpu` is important on Apple Silicon — MPS support in SAM2 is incomplete and will produce errors or silently fall back to CPU anyway. Forcing CPU explicitly avoids this.
+
+For quick iteration during development, YOLO is the practical alternative — it returns results in seconds on CPU, though it only detects objects it was trained on (not suitable for historical maps or general segmentation):
+
+```bash
+SEGMENTER=yolo uv run uvicorn server:app --host 0.0.0.0 --port 7771
+```
+
 ## API
 
 ### `POST /index-image`
@@ -70,32 +97,32 @@ Returns `200 OK` with model info. Use for uptime checks.
 
 ## Environment Variables
 
-| Variable          | Default                              | Description                    |
-|-------------------|--------------------------------------|--------------------------------|
-| `HOST`            | `0.0.0.0`                            | Bind host                      |
-| `PORT`            | `7771`                               | Bind port                      |
-| `SAM2_CHECKPOINT` | `models/sam2.1_hiera_large.pt`       | Path to SAM2 checkpoint        |
-| `SAM2_CONFIG`     | `configs/sam2.1/sam2.1_hiera_l.yaml` | Path to SAM2 config            |
-| `SEGMENTER`       | `sam2`                               | `sam2` or `yolo` (see below)   |
-| `API_KEY`         | _(unset)_                            | Bearer token; unset = no auth  |
-| `ALLOWED_ORIGINS` | `*`                                  | CORS origins (comma-separated) |
+| Variable          | Default                              | Description                                      |
+|-------------------|--------------------------------------|--------------------------------------------------|
+| `HOST`            | `0.0.0.0`                            | Bind host                                        |
+| `PORT`            | `7771`                               | Bind port                                        |
+| `SAM2_CHECKPOINT` | `models/sam2.1_hiera_large.pt`       | Path to SAM2 checkpoint                          |
+| `SAM2_DEVICE`     | _(auto-detect)_                      | Force device: `cpu`, `cuda`, or `mps`            |
+| `SEGMENTER`       | `sam2`                               | `sam2` or `yolo`                                 |
+| `API_KEY`         | _(unset)_                            | Bearer token; unset = no auth                    |
+| `ALLOWED_ORIGINS` | `*`                                  | CORS origins (comma-separated)                   |
 
 ## Choosing a Model
 
 ### SAM2 (default)
 
-Best segmentation quality. Requires a GPU for practical use.
+Best segmentation quality. Requires a GPU for practical use on large images.
 
-Swap to a lighter checkpoint via environment variables if VRAM is limited:
+| Model  | Checkpoint file             | VRAM    |
+|--------|-----------------------------|---------|
+| Large  | `sam2.1_hiera_large.pt`     | ~6 GB   |
+| Base+  | `sam2.1_hiera_base_plus.pt` | ~3.5 GB |
+| Small  | `sam2.1_hiera_small.pt`     | ~2.5 GB |
+| Tiny   | `sam2.1_hiera_tiny.pt`      | ~2 GB   |
 
-| Model  | Checkpoint file             | Config                        | VRAM    |
-|--------|-----------------------------|-------------------------------|---------|
-| Large  | `sam2.1_hiera_large.pt`     | `sam2.1/sam2.1_hiera_l.yaml`  | ~6 GB   |
-| Base+  | `sam2.1_hiera_base_plus.pt` | `sam2.1/sam2.1_hiera_b+.yaml` | ~3.5 GB |
-| Small  | `sam2.1_hiera_small.pt`     | `sam2.1/sam2.1_hiera_s.yaml`  | ~2.5 GB |
-| Tiny   | `sam2.1_hiera_tiny.pt`      | `sam2.1/sam2.1_hiera_t.yaml`  | ~2 GB   |
+The checkpoint filename determines the config automatically — no need to set `SAM2_CONFIG` manually.
 
-Example:
+Example with Small checkpoint:
 
 ```bash
 SAM2_CHECKPOINT=models/sam2.1_hiera_small.pt \
@@ -104,7 +131,7 @@ uv run uvicorn server:app --host 0.0.0.0 --port 7771
 
 ### YOLO Fallback
 
-A fast and CPU-friendly fallback. Good for development or machines without a GPU. Only detects objects YOLO was trained to recognise (people, vehicles, animals, etc.) rather than performing general segmentation.
+Fast and CPU-friendly. Only detects objects YOLO was trained to recognise (people, vehicles, animals, etc.) — not suitable for general or historical image segmentation.
 
 ```bash
 SEGMENTER=yolo uv run uvicorn server:app --host 0.0.0.0 --port 7771
@@ -113,6 +140,5 @@ SEGMENTER=yolo uv run uvicorn server:app --host 0.0.0.0 --port 7771
 ## Production Notes
 
 - SAM2 and CLIP are loaded once at startup and kept in memory. Expect ~8–10 GB VRAM total with Large + CLIP on GPU.
-- For CPU-only inference, startup is slower (~30s) but works. Consider Small or Tiny if running without a GPU.
 - Set `ALLOWED_ORIGINS` to your app's domain. Leave as `*` for local development only.
 - Set `API_KEY` to a long random string. Pass it from the browser as `Authorization: Bearer <key>`.
