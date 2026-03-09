@@ -2,5 +2,6 @@
 __pycache__/
 node_modules/
 **/models/*.pt
+**/test/*.onnx
 sample.*
 .DS_Store

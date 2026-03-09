@@ -99,7 +99,6 @@ Example:
 
 ```bash
 SAM2_CHECKPOINT=models/sam2.1_hiera_small.pt \
-SAM2_CONFIG=configs/sam2.1/sam2.1_hiera_s.yaml \
 uv run uvicorn server:app --host 0.0.0.0 --port 7771
 ```
 
