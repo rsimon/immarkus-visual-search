@@ -1,14 +1,17 @@
 # IMMARKUS Visual Search
 
-An IMMARKUS extension for visual search across your image collection.
+Visual search across your image collection, built as an IMMARKUS extension.
 
-## Visual Search Server
+## How it works
 
-A stateless FastAPI server that segments images with SAM2 and embeds each
-segment with CLIP. Returns bounding boxes and embedding vectors, to be stored
-locally in IMMARKUS for search later.
+1. **Indexing** — when you add an image, IMMARKUS sends it to a local Python server, which segments it into regions (using SAM2) and computes a CLIP embedding for each region. The resulting bounding boxes and embedding vectors are stored locally in IMMARKUS.
+2. **Querying** — when you search, IMMARKUS runs CLIP directly in the browser (via ONNX) to embed your query image, then computes cosine similarity against all stored embeddings locally. No server round-trip at query time.
 
-### Setup
+All processing stays on your machine. Images are never retained by the server after indexing.
+
+## Setup
+
+### 1. Visual Search Server
 
 Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
 
@@ -17,91 +20,28 @@ cd server
 uv sync
 ```
 
-Download SAM2.1 Large checkpoint
+Download the SAM2 model checkpoint:
 
 ```bash
 curl -L -o models/sam2.1_hiera_large.pt \
   https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt
 ```
 
-All available checkpoints: https://github.com/facebookresearch/sam2#download-checkpoints
-
-### Run
+Start the server:
 
 ```bash
 uv run uvicorn server:app --host 0.0.0.0 --port 7771
 ```
 
-Check it's up:
+Verify it's running:
+
 ```bash
 curl http://localhost:7771/health
 # {"status":"ok","clip_model":"ViT-B-32"}
 ```
 
-### API
+For configuration options, alternative models, and production deployment, see [guides/server.md](guides/server.md).
 
-#### `POST /index-image`
+### 2. IMMARKUS Frontend
 
-Segments an image and returns CLIP embeddings for each segment.
-
-**Request:** `multipart/form-data` with a single `file` field (any common image format).
-
-**Response:**
-```json
-{
-  "segments": [
-    {
-      "bbox": [0.12, 0.08, 0.45, 0.60],
-      "area": 0.23,
-      "embedding": [0.021, -0.14, "..."]
-    }
-  ],
-  "image_width": 1024,
-  "image_height": 768,
-  "processing_ms": 1240.5
-}
-```
-
-- `bbox` — normalised `[x, y, w, h]`, origin top-left, values in `[0, 1]`
-- `area` — normalised segment area in `[0, 1]`
-- `embedding` — 512-dim unit-normalised CLIP ViT-B/32 vector
-
-Images are never written to disk or retained after the response is sent.
-
-#### `GET /health`
-
-Returns `200 OK` with model info. Use for uptime checks.
-
-### Environment Variables
-
-| Variable          | Default                              | Description                     |
-|-------------------|--------------------------------------|---------------------------------|
-| `HOST`            | `0.0.0.0`                            | Bind host                       |
-| `PORT`            | `7771`                               | Bind port                       |
-| `SAM2_CHECKPOINT` | `models/sam2.1_hiera_large.pt`       | Path to SAM2 checkpoint         |
-| `SAM2_CONFIG`     | `configs/sam2.1/sam2.1_hiera_l.yaml` | Path to SAM2 config             |
-| `API_KEY`         | _(unset)_                            | Bearer token; unset = no auth   |
-| `ALLOWED_ORIGINS` | `*`                                  | CORS origins (comma-separated)  |
-
-### Using a smaller model
-
-If VRAM is limited, swap to a lighter checkpoint via env vars:
-
-| Model  | Checkpoint file             | Config                        | VRAM   |
-|--------|-----------------------------|-------------------------------|--------|
-| Large  | `sam2.1_hiera_large.pt`     | `sam2.1/sam2.1_hiera_l.yaml`  | ~6GB   |
-| Base+  | `sam2.1_hiera_base_plus.pt` | `sam2.1/sam2.1_hiera_b+.yaml` | ~3.5GB |
-| Small  | `sam2.1_hiera_small.pt`     | `sam2.1/sam2.1_hiera_s.yaml`  | ~2.5GB |
-| Tiny   | `sam2.1_hiera_tiny.pt`      | `sam2.1/sam2.1_hiera_t.yaml`  | ~2GB   |
-
-
-## Production Notes
-
-- Both SAM2 and CLIP are loaded once at startup and kept in memory.
-  Expect ~8–10GB VRAM total with Large + CLIP on GPU.
-- For CPU-only inference, startup is slower (~30s) but works.
-  Consider Small or Tiny if running without a GPU.
-- Set `ALLOWED_ORIGINS` to your app's domain in production.
-  Leave as `*` for local development only.
-- Set `API_KEY` to a long random string in production.
-  Pass it from the browser as `Authorization: Bearer <key>`.
+_TODO_
