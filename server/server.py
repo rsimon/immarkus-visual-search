@@ -11,7 +11,6 @@ Environment variables:
   HOST              bind host          (default: 0.0.0.0)
   PORT              bind port          (default: 7771)
   SAM2_CHECKPOINT   path to .pt file   (default: models/sam2.1_hiera_large.pt)
-  SAM2_CONFIG       path to yaml       (default: configs/sam2.1/sam2.1_hiera_l.yaml)
   API_KEY           shared secret      (default: unset = no auth)
   ALLOWED_ORIGINS   comma-separated    (default: * for local use)
 
@@ -22,6 +21,7 @@ Run:
 from __future__ import annotations
 
 import io
+import logging
 import os
 import time
 from contextlib import asynccontextmanager
@@ -33,17 +33,23 @@ from pydantic import BaseModel
 
 from visual_search import embedder, segmenter
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("server")
+
 
 # ── Lifespan: load models once at startup ────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("[server] Loading models…")
+    logger.info(f"Loading models (segmenter={segmenter.BACKEND})...")
     segmenter.load()
     embedder.load()
-    print("[server] Ready.")
+    logger.info("Server ready.")
     yield
-    # nothing to clean up — torch releases on process exit
 
 
 app = FastAPI(
@@ -126,14 +132,18 @@ async def index_image(
         raise HTTPException(status_code=422, detail=f"Cannot decode image: {exc}")
 
     W, H = img.size
+    logger.info(f"Processing '{file.filename}' ({W}x{H})...")
 
     # Segment
+    t_seg = time.perf_counter()
     try:
         segs = segmenter.segment(img)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Segmentation failed: {exc}")
+    logger.info(f"Segmentation: {len(segs)} segments in {time.perf_counter() - t_seg:.1f}s")
 
     # Embed each segment crop
+    t_emb = time.perf_counter()
     results: list[SegmentResult] = []
     for seg in segs:
         try:
@@ -146,14 +156,16 @@ async def index_image(
             area=seg.area,
             embedding=vec,
         ))
+    logger.info(f"Embedding: {len(results)} crops in {time.perf_counter() - t_emb:.1f}s")
 
-    elapsed = (time.perf_counter() - t0) * 1000
+    elapsed = time.perf_counter() - t0
+    logger.info(f"Done '{file.filename}': {len(results)} segments, total {elapsed:.1f}s")
 
     return IndexImageResponse(
         segments=results,
         image_width=W,
         image_height=H,
-        processing_ms=round(elapsed, 1),
+        processing_ms=round(elapsed * 1000, 1),
     )
 
 

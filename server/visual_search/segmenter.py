@@ -1,87 +1,163 @@
 """
-Segmentation using SAM2 automatic mask generation.
+Segmentation backend — SAM2 (default) or YOLO (CPU-friendly fallback).
 
-Model: SAM2.1 Large (default) — best quality, recommended for server-side
-batch indexing where throughput matters less than segment quality.
+Set SEGMENTER env var to choose:
+  SEGMENTER=sam2   best quality, needs GPU/MPS (default)
+  SEGMENTER=yolo   fast, CPU-friendly, good for development
 
-Checkpoint download:
-  https://github.com/facebookresearch/sam2#model-checkpoints
-
-Environment variables:
+SAM2 env vars:
   SAM2_CHECKPOINT   path to .pt file  (default: models/sam2.1_hiera_large.pt)
-  SAM2_CONFIG       path to yaml      (default: configs/sam2.1/sam2.1_hiera_l.yaml)
+
+YOLO env vars:
+  YOLO_MODEL        model name or path (default: yolo11n.pt — nano, fastest)
+                    other options: yolo11s.pt, yolo11m.pt, yolo11l.pt, yolo11x.pt
 """
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 
-import numpy as np
 import torch
 from PIL import Image
-from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
-from sam2.build_sam import build_sam2
 
-_generator: SAM2AutomaticMaskGenerator | None = None
+logger = logging.getLogger(__name__)
 
+BACKEND = os.getenv("SEGMENTER", "sam2").lower()
+
+
+# ── Shared types ──────────────────────────────────────────────────────────────
 
 @dataclass
 class Segment:
     """
-    A single detected segment.
     bbox: normalised (x, y, w, h) in [0, 1] — origin top-left
-    area: normalised area (mask pixels / total pixels)
+    area: normalised area in [0, 1]
     """
     bbox: tuple[float, float, float, float]
     area: float
 
 
-def load() -> None:
-    """Load SAM2 into memory. Call once at server startup."""
-    global _generator
+# ── Device selection ──────────────────────────────────────────────────────────
+
+def _select_device() -> str:
+    if torch.cuda.is_available():
+        return "cuda"
+    elif torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+# ── SAM2 backend ──────────────────────────────────────────────────────────────
+
+_sam2_generator = None
+
+
+def _load_sam2() -> None:
+    global _sam2_generator
+    from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
+    from sam2.build_sam import build_sam2
+    import sam2
 
     checkpoint = os.getenv("SAM2_CHECKPOINT", "models/sam2.1_hiera_large.pt")
-    config = os.getenv("SAM2_CONFIG", "configs/sam2.1/sam2.1_hiera_l.yaml")
-    device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    # Config files ship inside the sam2 package — resolve relative to it
+    # so the server works regardless of the working directory.
+    package_dir = os.path.dirname(sam2.__file__)
+    default_config = os.path.join(package_dir, "configs", "sam2.1", "sam2.1_hiera_l.yaml")
+    config = os.getenv("SAM2_CONFIG", default_config)
+
+    device = _select_device()
+
+    logger.info(f"Loading SAM2 on {device} ({checkpoint})...")
     sam = build_sam2(config, checkpoint, device=device)
-
-    _generator = SAM2AutomaticMaskGenerator(
+    _sam2_generator = SAM2AutomaticMaskGenerator(
         model=sam,
-        points_per_side=32,         # 32 = SAM2 default; increase for denser coverage
+        points_per_side=32,
         pred_iou_thresh=0.88,
         stability_score_thresh=0.95,
-        min_mask_region_area=256,   # skip sub-pixel noise
+        min_mask_region_area=256,
     )
+    logger.info("SAM2 ready")
 
-    print(f"[segmenter] SAM2.1 Large loaded ({checkpoint}) on {device}")
 
+def _segment_sam2(img: Image.Image) -> list[Segment]:
+    import numpy as np
+    assert _sam2_generator is not None
 
-def segment(img: Image.Image) -> list[Segment]:
-    """
-    Auto-generate segments for a PIL image.
-    Returns segments sorted by area descending (largest regions first).
-    """
-    assert _generator is not None, "Call segmenter.load() before segment()"
-
-    arr = np.array(img.convert("RGB"))
     W, H = img.size
+    logger.info(f"SAM2: generating masks for {W}x{H} image...")
+    masks = _sam2_generator.generate(np.array(img.convert("RGB")))
+    logger.info(f"SAM2: produced {len(masks)} masks")
+
     total = W * H
-
-    masks = _generator.generate(arr)
-
     segments = [
         Segment(
-            bbox=(
-                m["bbox"][0] / W,   # x
-                m["bbox"][1] / H,   # y
-                m["bbox"][2] / W,   # w
-                m["bbox"][3] / H,   # h
-            ),
+            bbox=(m["bbox"][0] / W, m["bbox"][1] / H,
+                  m["bbox"][2] / W, m["bbox"][3] / H),
             area=m["area"] / total,
         )
         for m in masks
     ]
-
     return sorted(segments, key=lambda s: s.area, reverse=True)
+
+
+# ── YOLO backend ──────────────────────────────────────────────────────────────
+
+_yolo_model = None
+
+
+def _load_yolo() -> None:
+    global _yolo_model
+    from ultralytics import YOLO, settings
+
+    model_name = os.getenv("YOLO_MODEL", "yolo11n.pt")
+    models_dir = os.path.abspath("models")
+    os.makedirs(models_dir, exist_ok=True)
+    settings.update({"weights_dir": models_dir})
+
+    logger.info(f"Loading YOLO ({model_name})...")
+    _yolo_model = YOLO(os.path.join(models_dir, model_name))
+    logger.info("YOLO ready")
+
+
+def _segment_yolo(img: Image.Image) -> list[Segment]:
+    assert _yolo_model is not None
+
+    W, H = img.size
+    logger.info(f"YOLO: detecting objects in {W}x{H} image...")
+    results = _yolo_model(img, verbose=False)
+    boxes = results[0].boxes
+
+    if boxes is None or len(boxes) == 0:
+        logger.info("YOLO: no objects detected")
+        return []
+
+    segments = []
+    for box in boxes.xyxy.tolist():
+        x1, y1, x2, y2 = box
+        w, h = x2 - x1, y2 - y1
+        segments.append(Segment(
+            bbox=(x1 / W, y1 / H, w / W, h / H),
+            area=(w * h) / (W * H),
+        ))
+
+    logger.info(f"YOLO: detected {len(segments)} objects")
+    return sorted(segments, key=lambda s: s.area, reverse=True)
+
+
+# ── Public interface ──────────────────────────────────────────────────────────
+
+def load() -> None:
+    if BACKEND == "yolo":
+        _load_yolo()
+    else:
+        _load_sam2()
+
+
+def segment(img: Image.Image) -> list[Segment]:
+    if BACKEND == "yolo":
+        return _segment_yolo(img)
+    else:
+        return _segment_sam2(img)
