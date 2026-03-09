@@ -21,7 +21,6 @@ async function walk(rootDir: string, dir: string, results: string[]): Promise<vo
 
     if (entry.isDirectory()) {
       // Skip the index directory itself
-      if (entry.name === '.visual-search') return;
       await walk(rootDir, fullPath, results);
     } else if (entry.isFile()) {
       if (IMAGE_EXTENSIONS.has(extname(entry.name).toLowerCase())) {

@@ -31,6 +31,7 @@ Start the server:
 
 ```bash
 uv run uvicorn server:app --host 0.0.0.0 --port 7771
+# SEGMENTER=yolo uv run uvicorn server:app --host 0.0.0.0 --port 7771
 ```
 
 Verify it's running:

@@ -1,5 +1,3 @@
-import { createReadStream } from 'fs';
-import { stat } from 'fs/promises';
 import { basename } from 'path';
 import type { IndexImageResponse } from './types.ts';
 
