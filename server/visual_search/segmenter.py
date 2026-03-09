@@ -86,12 +86,14 @@ def _load_sam2() -> None:
     sam = build_sam2(config, checkpoint, device=device)
     _sam2_generator = SAM2AutomaticMaskGenerator(
         model=sam,
-        points_per_side=32,
-        points_per_batch=16,
-        pred_iou_thresh=0.88,
-        stability_score_thresh=0.95,
-        min_mask_region_area=256,
-        # crop_n_layers=1
+        points_per_side=64,              # was 32 — finer grid, catches small icons
+        points_per_batch=16,             # keep memory under control
+        pred_iou_thresh=0.80,            # was 0.88 — more permissive, keeps uncertain small masks
+        stability_score_thresh=0.85,     # was 0.95 — same reason
+        min_mask_region_area=64,         # was 256 — allow ~8×8px minimum regions
+        # crop_n_layers=2,                 # was 1 — adds 4×4 crop pass for fine detail
+        # crop_overlap_ratio=0.4,          # slightly more overlap for boundary symbols
+        # crop_n_points_downscale_factor=2,
     )
     logger.info("SAM2 ready")
 
