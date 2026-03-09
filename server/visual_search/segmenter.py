@@ -7,6 +7,7 @@ Set SEGMENTER env var to choose:
 
 SAM2 env vars:
   SAM2_CHECKPOINT   path to .pt file  (default: models/sam2.1_hiera_large.pt)
+  SAM2_DEVICE       cpu | mps | cuda  (default: auto-detect)
 
 YOLO env vars:
   YOLO_MODEL        model name or path (default: yolo11n.pt — nano, fastest)
@@ -42,6 +43,10 @@ class Segment:
 # ── Device selection ──────────────────────────────────────────────────────────
 
 def _select_device() -> str:
+    override = os.getenv("SAM2_DEVICE", "").lower()
+    if override in ("cpu", "cuda", "mps"):
+        logger.info(f"Device override: {override}")
+        return override
     if torch.cuda.is_available():
         return "cuda"
     elif torch.backends.mps.is_available():
@@ -58,26 +63,35 @@ def _load_sam2() -> None:
     global _sam2_generator
     from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
     from sam2.build_sam import build_sam2
-    import sam2
 
     checkpoint = os.getenv("SAM2_CHECKPOINT", "models/sam2.1_hiera_large.pt")
 
-    # Config files ship inside the sam2 package — resolve relative to it
-    # so the server works regardless of the working directory.
-    package_dir = os.path.dirname(sam2.__file__)
-    default_config = os.path.join(package_dir, "configs", "sam2.1", "sam2.1_hiera_l.yaml")
-    config = os.getenv("SAM2_CONFIG", default_config)
+    # Hydra resolves config names relative to pkg://sam2 — derive the correct
+    # config from the checkpoint filename so they always stay in sync.
+    _config_map = {
+        "large":     "configs/sam2.1/sam2.1_hiera_l.yaml",
+        "base_plus": "configs/sam2.1/sam2.1_hiera_b+.yaml",
+        "small":     "configs/sam2.1/sam2.1_hiera_s.yaml",
+        "tiny":      "configs/sam2.1/sam2.1_hiera_t.yaml",
+    }
+    ckpt_name = os.path.basename(checkpoint)
+    config = next(
+        (cfg for key, cfg in _config_map.items() if key in ckpt_name),
+        _config_map["large"],  # fallback
+    )
 
     device = _select_device()
+    logger.info(f"SAM2 | device: {device} | checkpoint: {ckpt_name} | config: {config}")
 
-    logger.info(f"Loading SAM2 on {device} ({checkpoint})...")
     sam = build_sam2(config, checkpoint, device=device)
     _sam2_generator = SAM2AutomaticMaskGenerator(
         model=sam,
         points_per_side=32,
+        points_per_batch=16,
         pred_iou_thresh=0.88,
         stability_score_thresh=0.95,
         min_mask_region_area=256,
+        # crop_n_layers=1
     )
     logger.info("SAM2 ready")
 
