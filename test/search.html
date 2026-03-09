@@ -1,0 +1,807 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Visual Search</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Spectral:ital,wght@0,300;0,400;1,300&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --ink:      #1a1612;
+      --paper:    #f5f0e8;
+      --warm:     #e8dfc8;
+      --border:   #c8b89a;
+      --muted:    #8a7a66;
+      --accent:   #8b3a1a;
+      --accent2:  #2a4a6b;
+      --mono:     'IBM Plex Mono', monospace;
+      --serif:    'Spectral', Georgia, serif;
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: var(--serif);
+      font-weight: 300;
+    }
+
+    /* ── Layout ── */
+    .shell {
+      display: grid;
+      grid-template-rows: auto 1fr;
+      min-height: 100vh;
+    }
+
+    header {
+      border-bottom: 1px solid var(--border);
+      padding: 1.25rem 2.5rem;
+      display: flex;
+      align-items: baseline;
+      gap: 1.5rem;
+      background: var(--paper);
+    }
+
+    header h1 {
+      font-family: var(--mono);
+      font-size: 0.8rem;
+      font-weight: 500;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--accent);
+    }
+
+    header .subtitle {
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      color: var(--muted);
+    }
+
+    #model-status {
+      margin-left: auto;
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--border);
+      flex-shrink: 0;
+      transition: background 0.4s;
+    }
+    .dot.loading { background: #c8a020; animation: pulse 1s infinite; }
+    .dot.ready   { background: #4a8a3a; }
+    .dot.error   { background: var(--accent); }
+
+    @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
+
+    /* ── Main columns ── */
+    .workspace {
+      display: grid;
+      grid-template-columns: 320px 1fr;
+    }
+
+    /* ── Left panel ── */
+    .panel {
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow-y: auto;
+    }
+
+    .section {
+      padding: 1.5rem;
+      border-bottom: 1px solid var(--warm);
+    }
+
+    .label {
+      font-family: var(--mono);
+      font-size: 0.65rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 0.75rem;
+    }
+
+    /* Folder / index open buttons */
+    .open-btn {
+      width: 100%;
+      padding: 0.65rem 1rem;
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      background: transparent;
+      color: var(--ink);
+      font-family: var(--mono);
+      font-size: 0.75rem;
+      cursor: pointer;
+      text-align: left;
+      transition: background 0.15s, border-color 0.15s;
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      margin-bottom: 0.5rem;
+    }
+    .open-btn:hover { background: var(--warm); border-color: var(--muted); }
+    .open-btn.done  { border-color: #4a8a3a; color: #4a8a3a; }
+    .open-btn svg   { flex-shrink: 0; opacity: 0.6; }
+
+    .index-info {
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      color: var(--muted);
+      line-height: 1.9;
+      display: none;
+    }
+    .index-info.visible { display: block; }
+    .index-info b { color: var(--ink); }
+
+    /* Query image drop zone */
+    #query-zone {
+      border: 1px dashed var(--border);
+      border-radius: 2px;
+      aspect-ratio: 4/3;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+      overflow: hidden;
+      position: relative;
+    }
+    #query-zone:hover, #query-zone.drag-over {
+      border-color: var(--accent2);
+      background: rgba(42, 74, 107, 0.04);
+    }
+    #query-zone p {
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      color: var(--muted);
+      text-align: center;
+      line-height: 1.6;
+    }
+    #query-zone strong { color: var(--accent2); }
+    #query-preview {
+      position: absolute; inset: 0;
+      width: 100%; height: 100%;
+      object-fit: contain;
+      display: none;
+      background: var(--warm);
+    }
+    #file-input { display: none; }
+
+    /* Search button */
+    #search-btn {
+      width: 100%;
+      padding: 0.75rem;
+      background: var(--accent2);
+      color: #f5f0e8;
+      border: none;
+      border-radius: 2px;
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      font-weight: 500;
+      letter-spacing: 0.06em;
+      cursor: pointer;
+      transition: opacity 0.15s, transform 0.1s;
+    }
+    #search-btn:hover:not(:disabled) { opacity: 0.85; }
+    #search-btn:active:not(:disabled) { transform: scale(0.99); }
+    #search-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+    /* Progress */
+    #progress {
+      display: none;
+      flex-direction: column;
+      gap: 0.35rem;
+      margin-top: 0.75rem;
+    }
+    #progress.visible { display: flex; }
+    .prog-track {
+      height: 1px;
+      background: var(--border);
+      position: relative;
+      overflow: hidden;
+    }
+    .prog-fill {
+      position: absolute; left: -100%; top: 0;
+      width: 100%; height: 100%;
+      background: var(--accent2);
+      animation: slide 1.2s infinite ease-in-out;
+    }
+    @keyframes slide { 0% { left:-100%; } 100% { left:100%; } }
+    .prog-fill.done { animation: none; left: 0; }
+    #prog-label {
+      font-family: var(--mono);
+      font-size: 0.68rem;
+      color: var(--muted);
+    }
+
+    /* ── Results panel ── */
+    .results-area {
+      overflow-y: auto;
+      padding: 2rem 2.5rem;
+    }
+
+    #empty-results {
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 0.75rem;
+      color: var(--muted);
+      opacity: 0.5;
+    }
+    #empty-results svg { opacity: 0.3; }
+    #empty-results p { font-family: var(--mono); font-size: 0.75rem; }
+
+    #results-header {
+      display: none;
+      align-items: baseline;
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+      padding-bottom: 0.75rem;
+      border-bottom: 1px solid var(--warm);
+    }
+    #results-header.visible { display: flex; }
+    #results-header h2 {
+      font-size: 1rem;
+      font-weight: 300;
+      font-style: italic;
+    }
+    #results-header span {
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      color: var(--muted);
+    }
+
+    #results-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 1.25rem;
+    }
+
+    /* ── Result card ── */
+    .result-card {
+      background: white;
+      border: 1px solid var(--warm);
+      border-radius: 2px;
+      overflow: hidden;
+      opacity: 0;
+      transform: translateY(8px);
+      animation: fadeUp 0.3s ease forwards;
+      transition: box-shadow 0.2s, border-color 0.2s;
+    }
+    .result-card:hover {
+      box-shadow: 0 4px 20px rgba(26,22,18,0.12);
+      border-color: var(--border);
+    }
+    @keyframes fadeUp {
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .card-thumb {
+      width: 100%;
+      aspect-ratio: 1;
+      display: block;
+      object-fit: cover;
+      background: var(--warm);
+      border-bottom: 1px solid var(--warm);
+    }
+
+    .card-body {
+      padding: 0.6rem 0.75rem 0.75rem;
+    }
+
+    .card-score {
+      font-family: var(--mono);
+      font-size: 0.9rem;
+      font-weight: 500;
+      color: var(--accent2);
+      letter-spacing: -0.02em;
+    }
+
+    .card-score-bar {
+      height: 2px;
+      background: var(--warm);
+      border-radius: 1px;
+      margin: 0.35rem 0;
+      overflow: hidden;
+    }
+    .card-score-fill {
+      height: 100%;
+      background: var(--accent2);
+      border-radius: 1px;
+      transition: width 0.6s ease;
+    }
+
+    .card-filename {
+      font-family: var(--mono);
+      font-size: 0.62rem;
+      color: var(--muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-top: 0.2rem;
+    }
+
+    .card-bbox {
+      font-family: var(--mono);
+      font-size: 0.6rem;
+      color: var(--border);
+      margin-top: 0.15rem;
+    }
+  </style>
+</head>
+<body>
+<div class="shell">
+
+  <header>
+    <h1>Visual Search</h1>
+    <span class="subtitle">similarity search</span>
+    <div id="model-status">
+      <div class="dot" id="model-dot"></div>
+      <span id="model-label">ONNX model not loaded</span>
+    </div>
+  </header>
+
+  <div class="workspace">
+
+    <!-- ── Left panel ── -->
+    <div class="panel">
+
+      <div class="section">
+        <div class="label">Index</div>
+        <button class="open-btn" id="open-folder-btn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg>
+          Open image folder
+        </button>
+        <div class="index-info" id="index-info"></div>
+      </div>
+
+      <div class="section">
+        <div class="label">Query image</div>
+        <div id="query-zone">
+          <input type="file" id="file-input" accept="image/*">
+          <img id="query-preview" alt="Query">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" opacity="0.3"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+          <p><strong>Click</strong> or drop<br>an image here</p>
+        </div>
+      </div>
+
+      <div class="section">
+        <button id="search-btn" disabled>Search</button>
+        <div id="progress">
+          <div class="prog-track"><div class="prog-fill" id="prog-fill"></div></div>
+          <div id="prog-label">Loading model…</div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- ── Results ── -->
+    <div class="results-area">
+      <div id="empty-results">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="0.75">
+          <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </svg>
+        <p>Open a folder and upload a query image to begin</p>
+      </div>
+      <div id="results-header" class="results-header">
+        <h2 id="results-title">Results</h2>
+        <span id="results-meta"></span>
+      </div>
+      <div id="results-grid"></div>
+    </div>
+
+  </div>
+</div>
+
+<!-- onnxruntime-web from CDN -->
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.0/dist/ort.min.js"></script>
+
+<script type="module">
+// ═══════════════════════════════════════════════════════════════════════════════
+// Constants
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const EMBEDDING_DIM  = 512;
+const CLIP_SIZE      = 224;
+const CLIP_MEAN      = [0.48145466, 0.4578275,  0.40821073];
+const CLIP_STD       = [0.26862954, 0.26130258, 0.27577711];
+const MODEL_FILENAME = 'clip-vit-b-32-visual.onnx';
+const TOP_K          = 10;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// State
+// ═══════════════════════════════════════════════════════════════════════════════
+
+let ortSession    = null;   // ONNX inference session
+let folderHandle  = null;   // FileSystemDirectoryHandle (image folder)
+let indexMeta     = null;   // parsed index.json
+let embeddings    = null;   // Float32Array, N × 512
+let rowMap        = [];     // [{imageId, segmentIdx}] parallel to embeddings rows
+let queryFile     = null;   // File selected by user
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Elements
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const modelDot      = document.getElementById('model-dot');
+const modelLabel    = document.getElementById('model-label');
+const openFolderBtn = document.getElementById('open-folder-btn');
+const indexInfo     = document.getElementById('index-info');
+const queryZone     = document.getElementById('query-zone');
+const queryPreview  = document.getElementById('query-preview');
+const fileInput     = document.getElementById('file-input');
+const searchBtn     = document.getElementById('search-btn');
+const progress      = document.getElementById('progress');
+const progFill      = document.getElementById('prog-fill');
+const progLabel     = document.getElementById('prog-label');
+const emptyResults  = document.getElementById('empty-results');
+const resultsHeader = document.getElementById('results-header');
+const resultsTitle  = document.getElementById('results-title');
+const resultsMeta   = document.getElementById('results-meta');
+const resultsGrid   = document.getElementById('results-grid');
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ONNX model — load on page start
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function loadModel() {
+  setModelStatus('loading', 'Loading CLIP model…');
+  showProgress('Loading CLIP model…', false);
+
+  try {
+    // Model sits next to the HTML file
+    const modelUrl = new URL(MODEL_FILENAME, import.meta.url).href;
+    ortSession = await ort.InferenceSession.create(modelUrl, {
+      executionProviders: ['wasm'],
+    });
+    setModelStatus('ready', 'CLIP ViT-B/32 · ready');
+    hideProgress();
+    updateSearchBtn();
+  } catch (err) {
+    setModelStatus('error', 'Model failed to load');
+    hideProgress();
+    console.error('[clip] Failed to load ONNX model:', err);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Folder + index loading
+// ═══════════════════════════════════════════════════════════════════════════════
+
+openFolderBtn.addEventListener('click', async () => {
+  try {
+    folderHandle = await window.showDirectoryPicker({ mode: 'read' });
+    await loadIndex(folderHandle);
+    openFolderBtn.classList.add('done');
+    openFolderBtn.innerHTML = `
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="20 6 9 17 4 12"/></svg>
+      ${folderHandle.name}
+    `;
+    updateSearchBtn();
+  } catch (err) {
+    if (err.name !== 'AbortError') console.error('[folder]', err);
+  }
+});
+
+async function loadIndex(dirHandle) {
+  try {
+    const vsDir = await dirHandle.getDirectoryHandle('.visual-search');
+
+    // Read index.json
+    const jsonHandle = await vsDir.getFileHandle('index.json');
+    const jsonFile   = await jsonHandle.getFile();
+    indexMeta        = JSON.parse(await jsonFile.text());
+
+    // Read embeddings.bin
+    const binHandle  = await vsDir.getFileHandle('embeddings.bin');
+    const binFile    = await binHandle.getFile();
+    const buf        = await binFile.arrayBuffer();
+    embeddings       = new Float32Array(buf);
+
+    // Build rowMap
+    rowMap = [];
+    for (const image of indexMeta.images) {
+      for (let i = 0; i < image.segments.length; i++) {
+        rowMap[image.segments[i].embeddingRow] = {
+          imageId:    image.imageId,
+          imagePath:  image.imagePath,
+          segmentIdx: i,
+        };
+      }
+    }
+
+    const segCount = embeddings.length / EMBEDDING_DIM;
+    indexInfo.innerHTML =
+      `<b>${indexMeta.images.length}</b> images indexed<br>` +
+      `<b>${segCount}</b> segments<br>` +
+      `model: <b>${indexMeta.model}</b><br>` +
+      `updated: <b>${new Date(indexMeta.updated).toLocaleDateString()}</b>`;
+    indexInfo.classList.add('visible');
+
+  } catch (err) {
+    indexInfo.innerHTML = `<span style="color:var(--accent)">No .visual-search index found in this folder.</span>`;
+    indexInfo.classList.add('visible');
+    indexMeta  = null;
+    embeddings = null;
+    rowMap     = [];
+    console.error('[index]', err);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Query image selection
+// ═══════════════════════════════════════════════════════════════════════════════
+
+queryZone.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', e => loadQueryFile(e.target.files[0]));
+
+queryZone.addEventListener('dragover', e => {
+  e.preventDefault();
+  queryZone.classList.add('drag-over');
+});
+queryZone.addEventListener('dragleave', () => queryZone.classList.remove('drag-over'));
+queryZone.addEventListener('drop', e => {
+  e.preventDefault();
+  queryZone.classList.remove('drag-over');
+  loadQueryFile(e.dataTransfer.files[0]);
+});
+
+function loadQueryFile(file) {
+  if (!file || !file.type.startsWith('image/')) return;
+  queryFile = file;
+  queryPreview.src = URL.createObjectURL(file);
+  queryPreview.style.display = 'block';
+  queryZone.querySelector('svg').style.display = 'none';
+  queryZone.querySelector('p').style.display = 'none';
+  updateSearchBtn();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Search
+// ═══════════════════════════════════════════════════════════════════════════════
+
+searchBtn.addEventListener('click', async () => {
+  if (!ortSession || !queryFile || !embeddings) return;
+
+  searchBtn.disabled = true;
+  resultsGrid.innerHTML = '';
+  resultsHeader.classList.remove('visible');
+  emptyResults.style.display = 'none';
+  showProgress('Embedding query image…', false);
+
+  try {
+    const t0 = performance.now();
+
+    // 1. Embed the query image
+    const queryVec = await embedFile(queryFile);
+    const embedMs  = performance.now() - t0;
+
+    // 2. Cosine similarity search
+    showProgress('Searching…', false);
+    const results  = cosineScan(queryVec, TOP_K);
+    const searchMs = performance.now() - t0 - embedMs;
+
+    // 3. Render results
+    showProgress('Loading thumbnails…', false);
+    await renderResults(results, embedMs, searchMs);
+
+    hideProgress();
+    resultsMeta.textContent =
+      `embed ${embedMs.toFixed(0)}ms · search ${searchMs.toFixed(0)}ms`;
+    resultsHeader.classList.add('visible');
+
+  } catch (err) {
+    console.error('[search]', err);
+    progLabel.textContent = `Error: ${err.message}`;
+    progLabel.style.color = 'var(--accent)';
+  } finally {
+    searchBtn.disabled = false;
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CLIP embedding
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function embedFile(file) {
+  const bitmap = await createImageBitmap(file);
+  return embedBitmap(bitmap);
+}
+
+async function embedBitmap(bitmap, bbox = null) {
+  const canvas = new OffscreenCanvas(CLIP_SIZE, CLIP_SIZE);
+  const ctx    = canvas.getContext('2d');
+
+  if (bbox) {
+    const [nx, ny, nw, nh] = bbox;
+    const sw = bitmap.width,  sh = bitmap.height;
+    ctx.drawImage(bitmap,
+      nx * sw, ny * sh, nw * sw, nh * sh,
+      0, 0, CLIP_SIZE, CLIP_SIZE
+    );
+  } else {
+    ctx.drawImage(bitmap, 0, 0, CLIP_SIZE, CLIP_SIZE);
+  }
+
+  const imgData = ctx.getImageData(0, 0, CLIP_SIZE, CLIP_SIZE);
+  const tensor  = preprocessImageData(imgData);
+
+  const outputKey = ortSession.outputNames[0];
+  const result    = await ortSession.run({ pixel_values: tensor });
+  const raw       = result[outputKey].data;
+
+  return l2Normalise(raw);
+}
+
+function preprocessImageData(imgData) {
+  const { data, width, height } = imgData;
+  const f32 = new Float32Array(3 * width * height);
+
+  for (let i = 0; i < width * height; i++) {
+    f32[0 * width * height + i] = (data[i*4+0]/255 - CLIP_MEAN[0]) / CLIP_STD[0];
+    f32[1 * width * height + i] = (data[i*4+1]/255 - CLIP_MEAN[1]) / CLIP_STD[1];
+    f32[2 * width * height + i] = (data[i*4+2]/255 - CLIP_MEAN[2]) / CLIP_STD[2];
+  }
+
+  return new ort.Tensor('float32', f32, [1, 3, height, width]);
+}
+
+function l2Normalise(v) {
+  let norm = 0;
+  for (let i = 0; i < v.length; i++) norm += v[i] * v[i];
+  norm = Math.sqrt(norm);
+  const out = new Float32Array(v.length);
+  for (let i = 0; i < v.length; i++) out[i] = v[i] / norm;
+  return out;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Cosine scan
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function cosineScan(query, topK) {
+  const n      = rowMap.length;
+  const flat   = embeddings;
+  const scores = new Float32Array(n);
+
+  for (let i = 0; i < n; i++) {
+    const offset = i * EMBEDDING_DIM;
+    let dot = 0;
+    for (let d = 0; d < EMBEDDING_DIM; d++) {
+      dot += query[d] * flat[offset + d];
+    }
+    scores[i] = dot;
+  }
+
+  return Array.from({ length: n }, (_, i) => i)
+    .sort((a, b) => scores[b] - scores[a])
+    .slice(0, topK)
+    .map(row => ({
+      row,
+      score:      scores[row],
+      ...rowMap[row],
+    }));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Render results
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function renderResults(results, embedMs, searchMs) {
+  resultsTitle.textContent = `${results.length} results`;
+  resultsGrid.innerHTML = '';
+  emptyResults.style.display = 'none';
+
+  for (let i = 0; i < results.length; i++) {
+    const result = results[i];
+    const card   = await buildCard(result, i);
+    resultsGrid.appendChild(card);
+  }
+}
+
+async function buildCard(result, idx) {
+  const image      = indexMeta.images.find(img => img.imageId === result.imageId);
+  const segment    = image.segments[result.segmentIdx];
+  const scoreVal   = (result.score * 100).toFixed(1);
+  const filename   = result.imagePath.split('/').pop();
+
+  // Load and crop the image
+  const thumbDataUrl = await loadCrop(result.imagePath, segment.bbox);
+
+  const card = document.createElement('div');
+  card.className = 'result-card';
+  card.style.animationDelay = `${idx * 40}ms`;
+
+  card.innerHTML = `
+    <img class="card-thumb" src="${thumbDataUrl}" alt="${filename}">
+    <div class="card-body">
+      <div class="card-score">${scoreVal}%</div>
+      <div class="card-score-bar">
+        <div class="card-score-fill" style="width:${scoreVal}%"></div>
+      </div>
+      <div class="card-filename" title="${result.imagePath}">${filename}</div>
+      <div class="card-bbox">
+        bbox ${segment.bbox.map(v => v.toFixed(2)).join(', ')}
+      </div>
+    </div>
+  `;
+
+  return card;
+}
+
+async function loadCrop(imagePath, bbox) {
+  // Resolve the image file from the folder handle
+  // imagePath is relative to the folder root, may contain subfolders
+  const parts    = imagePath.split('/');
+  let   handle   = folderHandle;
+
+  for (let i = 0; i < parts.length - 1; i++) {
+    handle = await handle.getDirectoryHandle(parts[i]);
+  }
+
+  const fileHandle = await handle.getFileHandle(parts[parts.length - 1]);
+  const file       = await fileHandle.getFile();
+  const bitmap     = await createImageBitmap(file);
+
+  // Draw the bbox crop onto a canvas
+  const [nx, ny, nw, nh] = bbox;
+  const cropW = Math.round(nw * bitmap.width);
+  const cropH = Math.round(nh * bitmap.height);
+
+  const canvas = new OffscreenCanvas(cropW, cropH);
+  const ctx    = canvas.getContext('2d');
+  ctx.drawImage(
+    bitmap,
+    nx * bitmap.width, ny * bitmap.height, cropW, cropH,
+    0, 0, cropW, cropH
+  );
+
+  const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.85 });
+  return URL.createObjectURL(blob);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// UI helpers
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function setModelStatus(state, text) {
+  modelDot.className = `dot ${state}`;
+  modelLabel.textContent = text;
+}
+
+function showProgress(text, done) {
+  progress.classList.add('visible');
+  progLabel.textContent = text;
+  progFill.className    = done ? 'prog-fill done' : 'prog-fill';
+}
+
+function hideProgress() {
+  progress.classList.remove('visible');
+}
+
+function updateSearchBtn() {
+  searchBtn.disabled = !(ortSession && queryFile && embeddings);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Boot
+// ═══════════════════════════════════════════════════════════════════════════════
+
+loadModel();
+</script>
+</body>
+</html>
