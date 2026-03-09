@@ -1,0 +1,18 @@
+{
+  "name": "immarkus-visual-search-cli",
+  "private": true,
+  "version": "0.1.0",
+  "description": "CLI tool to build a visual search index from a folder of images",
+  "type": "module",
+  "scripts": {
+    "index": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "node-fetch": "^3.3.2"
+  },
+  "devDependencies": {
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "@types/node": "^25.3.5"
+  }
+}
