@@ -11,19 +11,23 @@ SAM2 env vars:
   SAM2_DEVICE       cpu | mps | cuda  (default: auto-detect)
 
 FastSAM env vars:
-  FASTSAM_MODEL     model filename    (default: FastSAM-x.pt, alt: FastSAM-s.pt)
+  FASTSAM_MODEL     model filename    (default: FastSAM-s.pt)
+                    alt: FastSAM-x.pt — better quality but higher memory use
   FASTSAM_DEVICE    cpu | mps | cuda  (default: auto-detect)
-  FASTSAM_CONF      confidence thresh (default: 0.4)
-  FASTSAM_IOU       NMS IOU thresh    (default: 0.9)
+  FASTSAM_CONF      confidence thresh (default: 0.1  — lower = more segments)
+  FASTSAM_IOU       NMS IOU thresh    (default: 0.9  — higher = less merging)
+  FASTSAM_IMGSZ     inference size px (default: 1024 — must be multiple of 32;
+                    higher catches smaller objects but uses more memory;
+                    FastSAM-x OOMs at 1536+ on machines with limited RAM)
 
 YOLOE env vars:
-  YOLOE_MODEL       model filename    (default: yoloe-11l-seg.pt)
-                    options: yoloe-11s-seg.pt, yoloe-11m-seg.pt, yoloe-11l-seg.pt
-                             yoloe-v8s-seg.pt, yoloe-v8m-seg.pt, yoloe-v8l-seg.pt
+  YOLOE_MODEL       model filename    (default: yoloe-11l-seg-pf.pt — prompt-free large)
+                    options: yoloe-11s-seg-pf.pt, yoloe-11m-seg-pf.pt, yoloe-11l-seg-pf.pt
   YOLOE_DEVICE      cpu | mps | cuda  (default: auto-detect)
-  YOLOE_CONF        confidence thresh (default: 0.1 — lower than YOLO default;
-                    prompt-free mode needs a relaxed threshold to detect unusual objects)
-  YOLOE_IOU         NMS IOU thresh    (default: 0.5)
+  YOLOE_CONF        confidence thresh (default: 0.005 — very low; catches small/unusual objects)
+  YOLOE_IOU         NMS IOU thresh    (default: 0.3  — keep distinct nearby objects separate)
+  YOLOE_IMGSZ       inference size px (default: 1280 — must be multiple of 32;
+                    higher catches smaller objects; 1920 needs plenty of RAM)
 """
 
 from __future__ import annotations
@@ -128,6 +132,14 @@ def _segment_sam2(img: Image.Image) -> list[Segment]:
 
 
 # ── FastSAM backend ───────────────────────────────────────────────────────────
+#
+# FastSAM is class-agnostic — finds arbitrary regions without a category
+# vocabulary. Tuning for more segments:
+#   FASTSAM_CONF  ↓ lower  → keeps lower-confidence regions
+#   FASTSAM_IOU   ↑ higher → less aggressive NMS merging
+#   FASTSAM_IMGSZ ↑ higher → more detail, catches smaller regions (more memory)
+#
+# FastSAM-s is the default — FastSAM-x OOMs at imgsz=1024+ on Mac.
 
 _fastsam_model = None
 
@@ -135,14 +147,13 @@ def _load_fastsam() -> None:
     global _fastsam_model
     from ultralytics import FastSAM
 
-    model_name = os.getenv("FASTSAM_MODEL", "FastSAM-x.pt")
+    model_name = os.getenv("FASTSAM_MODEL", "FastSAM-s.pt")
     models_dir = os.path.abspath("models")
     os.makedirs(models_dir, exist_ok=True)
 
     device = _select_device("FASTSAM_DEVICE")
     logger.info(f"FastSAM | device: {device} | model: {model_name}")
 
-    # Auto-downloads to models/ dir on first use
     _fastsam_model = FastSAM(os.path.join(models_dir, model_name))
     logger.info("FastSAM ready")
 
@@ -151,21 +162,22 @@ def _segment_fastsam(img: Image.Image) -> list[Segment]:
     assert _fastsam_model is not None
 
     W, H = img.size
-    conf   = float(os.getenv("FASTSAM_CONF", "0.4"))
-    iou    = float(os.getenv("FASTSAM_IOU", "0.9"))
+    conf   = float(os.getenv("FASTSAM_CONF",  "0.01"))
+    iou    = float(os.getenv("FASTSAM_IOU",   "0.5"))
+    imgsz  = int(os.getenv("FASTSAM_IMGSZ", "1280"))
+    max_det = int(os.getenv("FASTSAM_MAX_DET", "800"))
     device = _select_device("FASTSAM_DEVICE")
 
-    logger.info(f"FastSAM: segmenting {W}x{H} image (conf={conf}, iou={iou})...")
+    logger.info(f"FastSAM: segmenting {W}x{H} image (conf={conf}, iou={iou}, imgsz={imgsz})...")
 
-    # Current ultralytics API: predict() returns results directly with masks.
-    # No FastSAMPrompt needed for the everything (all-regions) use case.
     results = _fastsam_model.predict(
         img,
         device=device,
-        retina_masks=True,
-        imgsz=1024,
+        retina_masks=False,
+        imgsz=imgsz,
         conf=conf,
         iou=iou,
+        max_det=max_det,
         verbose=False,
     )
 
@@ -204,7 +216,6 @@ def _load_yoloe() -> None:
     device = _select_device("YOLOE_DEVICE")
     logger.info(f"YOLOE | device: {device} | model: {model_name}")
 
-    # Auto-downloads to models/ dir on first use
     _yoloe_model = YOLOE(os.path.join(models_dir, model_name))
     logger.info("YOLOE ready")
 
@@ -213,14 +224,13 @@ def _segment_yoloe(img: Image.Image) -> list[Segment]:
     assert _yoloe_model is not None
 
     W, H = img.size
-    # Default conf is intentionally low — prompt-free mode needs a relaxed
-    # threshold to detect objects outside the standard COCO/LVIS distribution.
-    conf   = float(os.getenv("YOLOE_CONF", "0.005"))
-    iou    = float(os.getenv("YOLOE_IOU", "0.5"))
-    imgsz  = int(os.getenv("YOLOE_IMGSZ", "1280")) # 1920 if you have lots of memory!
+    conf   = float(os.getenv("YOLOE_CONF",  "0.005"))
+    iou    = float(os.getenv("YOLOE_IOU",   "0.3"))
+    imgsz  = int(os.getenv("YOLOE_IMGSZ", "1280"))  # 1920 if you have lots of memory!
+    max_det = int(os.getenv("YOLOE_MAX_DET", "1000"))
     device = _select_device("YOLOE_DEVICE")
 
-    logger.info(f"YOLOE: segmenting {W}x{H} image (conf={conf}, iou={iou})...")
+    logger.info(f"YOLOE: segmenting {W}x{H} image (conf={conf}, iou={iou}, imgsz={imgsz})...")
 
     results = _yoloe_model.predict(
         img,
@@ -228,6 +238,7 @@ def _segment_yoloe(img: Image.Image) -> list[Segment]:
         conf=conf,
         iou=iou,
         imgsz=imgsz,
+        max_det=max_det,
         verbose=False,
     )
 
@@ -246,10 +257,10 @@ def _segment_yoloe(img: Image.Image) -> list[Segment]:
                         area=(w * h) / total,
                     ))
             continue
+
         for mask_tensor, box in zip(result.masks.data, result.boxes.xyxy.tolist()):
             x1, y1, x2, y2 = box
             w, h = x2 - x1, y2 - y1
-            import numpy as np
             area = float(mask_tensor.cpu().numpy().sum())
             segments.append(Segment(
                 bbox=(x1 / W, y1 / H, w / W, h / H),
