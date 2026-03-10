@@ -7,7 +7,7 @@ Set SEGMENTER env var to choose:
   SEGMENTER=yoloe     fastest, CPU-friendly, open-vocabulary dev fallback
 
 SAM2 env vars:
-  SAM2_CHECKPOINT   path to .pt file  (default: models/sam2.1_hiera_large.pt)
+  SAM2_CHECKPOINT   path to .pt file  (default: models/sam2.1_hiera_small.pt)
   SAM2_DEVICE       cpu | mps | cuda  (default: auto-detect)
 
 FastSAM env vars:
@@ -79,7 +79,7 @@ def _load_sam2() -> None:
     from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
     from sam2.build_sam import build_sam2
 
-    checkpoint = os.getenv("SAM2_CHECKPOINT", "models/sam2.1_hiera_large.pt")
+    checkpoint = os.getenv("SAM2_CHECKPOINT", "models/sam2.1_hiera_small.pt")
 
     _config_map = {
         "large":     "configs/sam2.1/sam2.1_hiera_l.yaml",
@@ -99,11 +99,11 @@ def _load_sam2() -> None:
     sam = build_sam2(config, checkpoint, device=device)
     _sam2_generator = SAM2AutomaticMaskGenerator(
         model=sam,
-        points_per_side=32,
-        points_per_batch=16,
-        pred_iou_thresh=0.88,
-        stability_score_thresh=0.95,
-        min_mask_region_area=256,
+        points_per_side=64,
+        points_per_batch=16,       # keep low to avoid OOM
+        pred_iou_thresh=0.7,
+        stability_score_thresh=0.7,
+        min_mask_region_area=64,
         crop_n_layers=1,
         crop_n_points_downscale_factor=2,
     )

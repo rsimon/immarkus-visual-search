@@ -22,8 +22,8 @@ uv sync --extra export    # adds ONNX export tools (for the browser client)
 Download the SAM2.1 Large checkpoint:
 
 ```bash
-curl -L -o models/sam2.1_hiera_large.pt \
-  https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt
+curl -L -o models/sam2.1_hiera_small.pt \
+  https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_small.pt
 ```
 
 FastSAM and YOLOE download their checkpoints automatically on first use — no manual download needed.
