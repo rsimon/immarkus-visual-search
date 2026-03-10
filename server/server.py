@@ -142,20 +142,17 @@ async def index_image(
         raise HTTPException(status_code=500, detail=f"Segmentation failed: {exc}")
     logger.info(f"Segmentation: {len(segs)} segments in {time.perf_counter() - t_seg:.1f}s")
 
-    # Embed each segment crop
+    # Embed all segment crops in batches
     t_emb = time.perf_counter()
-    results: list[SegmentResult] = []
-    for seg in segs:
-        try:
-            vec = embedder.embed_crop(img, seg.bbox)
-        except Exception:
-            continue  # skip malformed crops rather than failing the whole request
+    try:
+        embeddings = embedder.embed_crops(img, [s.bbox for s in segs])
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Embedding failed: {exc}")
 
-        results.append(SegmentResult(
-            bbox=list(seg.bbox),
-            area=seg.area,
-            embedding=vec,
-        ))
+    results: list[SegmentResult] = [
+        SegmentResult(bbox=list(seg.bbox), area=seg.area, embedding=vec)
+        for seg, vec in zip(segs, embeddings)
+    ]
     logger.info(f"Embedding: {len(results)} crops in {time.perf_counter() - t_emb:.1f}s")
 
     elapsed = time.perf_counter() - t0
