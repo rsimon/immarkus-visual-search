@@ -11,6 +11,14 @@ cd server
 uv sync
 ```
 
+`uv sync` installs the core dependencies only (SAM2 + CLIP). Install extras depending on which segmentation backend you plan to use:
+
+```bash
+uv sync --extra fastsam   # adds FastSAM
+uv sync --extra yoloe     # adds YOLOE
+uv sync --extra export    # adds ONNX export tools (for the browser client)
+```
+
 Download the SAM2.1 Large checkpoint:
 
 ```bash
@@ -18,7 +26,9 @@ curl -L -o models/sam2.1_hiera_large.pt \
   https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt
 ```
 
-All available checkpoints: https://github.com/facebookresearch/sam2#download-checkpoints
+FastSAM and YOLOE download their checkpoints automatically on first use — no manual download needed.
+
+All available SAM2 checkpoints: https://github.com/facebookresearch/sam2#download-checkpoints
 
 ## Running
 
@@ -35,30 +45,32 @@ curl http://localhost:7771/health
 
 ## Minimum working example (Mac / no GPU)
 
-If you just want to verify the pipeline end-to-end without a GPU, use SAM2 Small forced onto CPU. Segmentation quality is still good; the tradeoff is speed — expect several minutes per large image.
+For quick local development without a GPU, use YOLOE — it runs in seconds on CPU and downloads its checkpoint automatically:
 
-Download the Small checkpoint:
+```bash
+uv sync --extra yoloe
+SEGMENTER=yoloe uv run uvicorn server:app --host 0.0.0.0 --port 7771
+```
+
+Note that YOLOE is open-vocabulary but still detection-based — it works well for development but may miss domain-specific iconography (e.g. historical map symbols). For better coverage on unusual imagery, FastSAM is a class-agnostic alternative:
+
+```bash
+uv sync --extra fastsam
+SEGMENTER=fastsam uv run uvicorn server:app --host 0.0.0.0 --port 7771
+```
+
+If you want to test with SAM2 itself on CPU, use the Small checkpoint and force the device explicitly:
 
 ```bash
 curl -L -o models/sam2.1_hiera_small.pt \
   https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_small.pt
-```
 
-Then run with both overrides:
-
-```bash
 SAM2_CHECKPOINT=models/sam2.1_hiera_small.pt \
 SAM2_DEVICE=cpu \
 uv run uvicorn server:app --host 0.0.0.0 --port 7771
 ```
 
-`SAM2_DEVICE=cpu` is important on Apple Silicon — MPS support in SAM2 is incomplete and will produce errors or silently fall back to CPU anyway. Forcing CPU explicitly avoids this.
-
-For quick iteration during development, YOLO is the practical alternative — it returns results in seconds on CPU, though it only detects objects it was trained on (not suitable for historical maps or general segmentation):
-
-```bash
-SEGMENTER=yolo uv run uvicorn server:app --host 0.0.0.0 --port 7771
-```
+`SAM2_DEVICE=cpu` is important on Apple Silicon — MPS support in SAM2 is incomplete and can produce errors or silently fall back to CPU anyway. Forcing CPU explicitly avoids this. Be aware that SAM2 on CPU is very slow for large images (several minutes each).
 
 ## API
 
@@ -97,21 +109,25 @@ Returns `200 OK` with model info. Use for uptime checks.
 
 ## Environment Variables
 
-| Variable          | Default                              | Description                                      |
-|-------------------|--------------------------------------|--------------------------------------------------|
-| `HOST`            | `0.0.0.0`                            | Bind host                                        |
-| `PORT`            | `7771`                               | Bind port                                        |
-| `SAM2_CHECKPOINT` | `models/sam2.1_hiera_large.pt`       | Path to SAM2 checkpoint                          |
-| `SAM2_DEVICE`     | _(auto-detect)_                      | Force device: `cpu`, `cuda`, or `mps`            |
-| `SEGMENTER`       | `sam2`                               | `sam2` or `yolo`                                 |
-| `API_KEY`         | _(unset)_                            | Bearer token; unset = no auth                    |
-| `ALLOWED_ORIGINS` | `*`                                  | CORS origins (comma-separated)                   |
+| Variable          | Default                          | Description                                   |
+|-------------------|----------------------------------|-----------------------------------------------|
+| `SEGMENTER`       | `sam2`                           | `sam2`, `fastsam`, or `yoloe`                 |
+| `SAM2_CHECKPOINT` | `models/sam2.1_hiera_large.pt`   | Path to SAM2 checkpoint file                  |
+| `SAM2_DEVICE`     | _(auto-detect)_                  | Force device: `cpu`, `cuda`, or `mps`         |
+| `FASTSAM_MODEL`   | `FastSAM-x.pt`                   | FastSAM checkpoint (`FastSAM-s.pt` for speed) |
+| `FASTSAM_DEVICE`  | _(auto-detect)_                  | Force device: `cpu`, `cuda`, or `mps`         |
+| `FASTSAM_CONF`    | `0.4`                            | FastSAM confidence threshold                  |
+| `FASTSAM_IOU`     | `0.9`                            | FastSAM NMS IOU threshold                     |
+| `YOLOE_MODEL`     | `yoloe-11l-seg.pt`               | YOLOE checkpoint (see options below)          |
+| `YOLOE_DEVICE`    | _(auto-detect)_                  | Force device: `cpu`, `cuda`, or `mps`         |
+| `API_KEY`         | _(unset)_                        | Bearer token; unset = no auth                 |
+| `ALLOWED_ORIGINS` | `*`                              | CORS origins (comma-separated)                |
 
-## Choosing a Model
+## Choosing a Segmentation Backend
 
-### SAM2 (default)
+### SAM2 (default) — best quality
 
-Best segmentation quality. Requires a GPU for practical use on large images.
+Class-agnostic segmentation. Finds anything in the image regardless of category. Requires a GPU for practical throughput.
 
 | Model  | Checkpoint file             | VRAM    |
 |--------|-----------------------------|---------|
@@ -120,22 +136,26 @@ Best segmentation quality. Requires a GPU for practical use on large images.
 | Small  | `sam2.1_hiera_small.pt`     | ~2.5 GB |
 | Tiny   | `sam2.1_hiera_tiny.pt`      | ~2 GB   |
 
-The checkpoint filename determines the config automatically — no need to set `SAM2_CONFIG` manually.
+The checkpoint filename determines the config automatically.
 
-Example with Small checkpoint:
+### FastSAM — balanced fallback
 
-```bash
-SAM2_CHECKPOINT=models/sam2.1_hiera_small.pt \
-uv run uvicorn server:app --host 0.0.0.0 --port 7771
-```
+Class-agnostic segmentation using a YOLO-based encoder. Significantly faster than SAM2, CPU-viable, and still finds arbitrary regions regardless of category. Recommended when a GPU isn't available but segmentation quality matters.
 
-### YOLO Fallback
+| Model       | Notes                        |
+|-------------|------------------------------|
+| FastSAM-x.pt | larger, better quality (default) |
+| FastSAM-s.pt | smaller, faster              |
 
-Fast and CPU-friendly. Only detects objects YOLO was trained to recognise (people, vehicles, animals, etc.) — not suitable for general or historical image segmentation.
+### YOLOE — fastest, dev fallback
 
-```bash
-SEGMENTER=yolo uv run uvicorn server:app --host 0.0.0.0 --port 7771
-```
+Open-vocabulary detection with a built-in 1200+ category vocabulary. Fastest option and the most practical for local development on CPU. Returns segments only for recognisable objects — may miss domain-specific iconography like historical map symbols.
+
+| Model              | Notes              |
+|--------------------|--------------------|
+| `yoloe-11l-seg.pt` | default            |
+| `yoloe-11m-seg.pt` | smaller/faster     |
+| `yoloe-11s-seg.pt` | smallest/fastest   |
 
 ## Production Notes
 

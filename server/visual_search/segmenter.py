@@ -1,17 +1,26 @@
 """
-Segmentation backend — SAM2 (default) or YOLO (CPU-friendly fallback).
+Segmentation backend.
 
 Set SEGMENTER env var to choose:
-  SEGMENTER=sam2   best quality, needs GPU/MPS (default)
-  SEGMENTER=yolo   fast, CPU-friendly, good for development
+  SEGMENTER=sam2      best quality, needs GPU (default)
+  SEGMENTER=fastsam   class-agnostic, CPU-viable, balanced fallback
+  SEGMENTER=yoloe     fastest, CPU-friendly, open-vocabulary dev fallback
 
 SAM2 env vars:
   SAM2_CHECKPOINT   path to .pt file  (default: models/sam2.1_hiera_large.pt)
   SAM2_DEVICE       cpu | mps | cuda  (default: auto-detect)
 
-YOLO env vars:
-  YOLO_MODEL        model name or path (default: yolo11n.pt — nano, fastest)
-                    other options: yolo11s.pt, yolo11m.pt, yolo11l.pt, yolo11x.pt
+FastSAM env vars:
+  FASTSAM_MODEL     model filename    (default: FastSAM-x.pt, alt: FastSAM-s.pt)
+  FASTSAM_DEVICE    cpu | mps | cuda  (default: auto-detect)
+  FASTSAM_CONF      confidence thresh (default: 0.4)
+  FASTSAM_IOU       NMS IOU thresh    (default: 0.9)
+
+YOLOE env vars:
+  YOLOE_MODEL       model filename    (default: yoloe-11l-seg.pt)
+                    options: yoloe-11s-seg.pt, yoloe-11m-seg.pt, yoloe-11l-seg.pt
+                             yoloe-v8s-seg.pt, yoloe-v8m-seg.pt, yoloe-v8l-seg.pt
+  YOLOE_DEVICE      cpu | mps | cuda  (default: auto-detect)
 """
 
 from __future__ import annotations
@@ -40,16 +49,16 @@ class Segment:
     area: float
 
 
-# ── Device selection ──────────────────────────────────────────────────────────
+# ── Device helpers ────────────────────────────────────────────────────────────
 
-def _select_device() -> str:
-    override = os.getenv("SAM2_DEVICE", "").lower()
+def _select_device(env_var: str) -> str:
+    override = os.getenv(env_var, "").lower()
     if override in ("cpu", "cuda", "mps"):
-        logger.info(f"Device override: {override}")
+        logger.info(f"Device override ({env_var}): {override}")
         return override
     if torch.cuda.is_available():
         return "cuda"
-    elif torch.backends.mps.is_available():
+    if torch.backends.mps.is_available():
         return "mps"
     return "cpu"
 
@@ -58,7 +67,6 @@ def _select_device() -> str:
 
 _sam2_generator = None
 
-
 def _load_sam2() -> None:
     global _sam2_generator
     from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
@@ -66,8 +74,6 @@ def _load_sam2() -> None:
 
     checkpoint = os.getenv("SAM2_CHECKPOINT", "models/sam2.1_hiera_large.pt")
 
-    # Hydra resolves config names relative to pkg://sam2 — derive the correct
-    # config from the checkpoint filename so they always stay in sync.
     _config_map = {
         "large":     "configs/sam2.1/sam2.1_hiera_l.yaml",
         "base_plus": "configs/sam2.1/sam2.1_hiera_b+.yaml",
@@ -77,22 +83,22 @@ def _load_sam2() -> None:
     ckpt_name = os.path.basename(checkpoint)
     config = next(
         (cfg for key, cfg in _config_map.items() if key in ckpt_name),
-        _config_map["large"],  # fallback
+        _config_map["large"],
     )
 
-    device = _select_device()
+    device = _select_device("SAM2_DEVICE")
     logger.info(f"SAM2 | device: {device} | checkpoint: {ckpt_name} | config: {config}")
 
     sam = build_sam2(config, checkpoint, device=device)
     _sam2_generator = SAM2AutomaticMaskGenerator(
         model=sam,
-        points_per_side=64,              # was 32 — finer grid, catches small icons
-        points_per_batch=16,             # keep memory under control
-        pred_iou_thresh=0.80,            # was 0.88 — more permissive, keeps uncertain small masks
-        stability_score_thresh=0.85,     # was 0.95 — same reason
-        min_mask_region_area=64,         # was 256 — allow ~8×8px minimum regions
-        # crop_n_layers=2,                 # was 1 — adds 4×4 crop pass for fine detail
-        # crop_overlap_ratio=0.4,          # slightly more overlap for boundary symbols
+        points_per_side=32,
+        points_per_batch=16,
+        pred_iou_thresh=0.88,
+        stability_score_thresh=0.95,
+        min_mask_region_area=256,
+        # crop_n_layers=2,                 
+        # crop_overlap_ratio=0.4,
         # crop_n_points_downscale_factor=2,
     )
     logger.info("SAM2 ready")
@@ -119,61 +125,145 @@ def _segment_sam2(img: Image.Image) -> list[Segment]:
     return sorted(segments, key=lambda s: s.area, reverse=True)
 
 
-# ── YOLO backend ──────────────────────────────────────────────────────────────
+# ── FastSAM backend ───────────────────────────────────────────────────────────
 
-_yolo_model = None
+_fastsam_model = None
 
+def _load_fastsam() -> None:
+    global _fastsam_model
+    from ultralytics import FastSAM
 
-def _load_yolo() -> None:
-    global _yolo_model
-    from ultralytics import YOLO, settings
-
-    model_name = os.getenv("YOLO_MODEL", "yolo11n.pt")
+    model_name = os.getenv("FASTSAM_MODEL", "FastSAM-x.pt")
     models_dir = os.path.abspath("models")
     os.makedirs(models_dir, exist_ok=True)
-    settings.update({"weights_dir": models_dir})
 
-    logger.info(f"Loading YOLO ({model_name})...")
-    _yolo_model = YOLO(os.path.join(models_dir, model_name))
-    logger.info("YOLO ready")
+    model_path = os.path.join(models_dir, model_name)
+    device = _select_device("FASTSAM_DEVICE")
+    logger.info(f"FastSAM | device: {device} | model: {model_name}")
+
+    _fastsam_model = FastSAM(model_path)
+    logger.info("FastSAM ready")
 
 
-def _segment_yolo(img: Image.Image) -> list[Segment]:
-    assert _yolo_model is not None
+def _segment_fastsam(img: Image.Image) -> list[Segment]:
+    from ultralytics.models.fastsam import FastSAMPrompt
+
+    assert _fastsam_model is not None
 
     W, H = img.size
-    logger.info(f"YOLO: detecting objects in {W}x{H} image...")
-    results = _yolo_model(img, verbose=False)
-    boxes = results[0].boxes
+    conf = float(os.getenv("FASTSAM_CONF", "0.4"))
+    iou  = float(os.getenv("FASTSAM_IOU", "0.9"))
+    device = _select_device("FASTSAM_DEVICE")
 
-    if boxes is None or len(boxes) == 0:
-        logger.info("YOLO: no objects detected")
+    logger.info(f"FastSAM: segmenting {W}x{H} image (conf={conf}, iou={iou})...")
+
+    results = _fastsam_model(
+        img,
+        device=device,
+        retina_masks=True,
+        imgsz=1024,
+        conf=conf,
+        iou=iou,
+        verbose=False,
+    )
+
+    prompt_process = FastSAMPrompt(img, results, device=device)
+    annotations = prompt_process.everything_prompt()
+
+    if annotations is None or len(annotations) == 0:
+        logger.info("FastSAM: no segments found")
         return []
 
     segments = []
-    for box in boxes.xyxy.tolist():
-        x1, y1, x2, y2 = box
-        w, h = x2 - x1, y2 - y1
+    total = W * H
+
+    for ann in annotations:
+        # ann is a boolean mask of shape (H, W)
+        import numpy as np
+        mask = ann.cpu().numpy() if hasattr(ann, "cpu") else np.array(ann)
+        rows = np.any(mask, axis=1)
+        cols = np.any(mask, axis=0)
+        if not rows.any():
+            continue
+        y1, y2 = np.where(rows)[0][[0, -1]]
+        x1, x2 = np.where(cols)[0][[0, -1]]
+        w, h = int(x2 - x1), int(y2 - y1)
+        area = int(mask.sum())
         segments.append(Segment(
             bbox=(x1 / W, y1 / H, w / W, h / H),
-            area=(w * h) / (W * H),
+            area=area / total,
         ))
 
-    logger.info(f"YOLO: detected {len(segments)} objects")
+    logger.info(f"FastSAM: produced {len(segments)} segments")
+    return sorted(segments, key=lambda s: s.area, reverse=True)
+
+
+# ── YOLOE backend ─────────────────────────────────────────────────────────────
+
+_yoloe_model = None
+
+def _load_yoloe() -> None:
+    global _yoloe_model
+    from ultralytics import YOLOE
+
+    model_name = os.getenv("YOLOE_MODEL", "yoloe-11l-seg.pt")
+    models_dir = os.path.abspath("models")
+    os.makedirs(models_dir, exist_ok=True)
+
+    model_path = os.path.join(models_dir, model_name)
+    device = _select_device("YOLOE_DEVICE")
+    logger.info(f"YOLOE | device: {device} | model: {model_name}")
+
+    # YOLOE downloads automatically on first use if not found locally
+    _yoloe_model = YOLOE(model_path)
+    logger.info("YOLOE ready")
+
+
+def _segment_yoloe(img: Image.Image) -> list[Segment]:
+    assert _yoloe_model is not None
+
+    W, H = img.size
+    device = _select_device("YOLOE_DEVICE")
+
+    logger.info(f"YOLOE: segmenting {W}x{H} image in prompt-free mode...")
+
+    # Prompt-free inference: model uses its built-in 1200+ category vocabulary
+    results = _yoloe_model.predict(img, device=device, verbose=False)
+
+    segments = []
+    total = W * H
+
+    for result in results:
+        if result.masks is None:
+            continue
+        for mask_xy, box in zip(result.masks.xy, result.boxes.xyxy.tolist()):
+            x1, y1, x2, y2 = box
+            w, h = x2 - x1, y2 - y1
+            area = w * h
+            segments.append(Segment(
+                bbox=(x1 / W, y1 / H, w / W, h / H),
+                area=area / total,
+            ))
+
+    logger.info(f"YOLOE: produced {len(segments)} segments")
     return sorted(segments, key=lambda s: s.area, reverse=True)
 
 
 # ── Public interface ──────────────────────────────────────────────────────────
 
 def load() -> None:
-    if BACKEND == "yolo":
-        _load_yolo()
+    if BACKEND == "fastsam":
+        _load_fastsam()
+    elif BACKEND == "yoloe":
+        _load_yoloe()
     else:
         _load_sam2()
 
 
 def segment(img: Image.Image) -> list[Segment]:
-    if BACKEND == "yolo":
-        return _segment_yolo(img)
+    if BACKEND == "fastsam":
+        return _segment_fastsam(img)
+    elif BACKEND == "yoloe":
+        return _segment_yoloe(img)
     else:
         return _segment_sam2(img)
