@@ -21,6 +21,9 @@ YOLOE env vars:
                     options: yoloe-11s-seg.pt, yoloe-11m-seg.pt, yoloe-11l-seg.pt
                              yoloe-v8s-seg.pt, yoloe-v8m-seg.pt, yoloe-v8l-seg.pt
   YOLOE_DEVICE      cpu | mps | cuda  (default: auto-detect)
+  YOLOE_CONF        confidence thresh (default: 0.1 — lower than YOLO default;
+                    prompt-free mode needs a relaxed threshold to detect unusual objects)
+  YOLOE_IOU         NMS IOU thresh    (default: 0.5)
 """
 
 from __future__ import annotations
@@ -97,9 +100,8 @@ def _load_sam2() -> None:
         pred_iou_thresh=0.88,
         stability_score_thresh=0.95,
         min_mask_region_area=256,
-        # crop_n_layers=2,                 
-        # crop_overlap_ratio=0.4,
-        # crop_n_points_downscale_factor=2,
+        crop_n_layers=1,
+        crop_n_points_downscale_factor=2,
     )
     logger.info("SAM2 ready")
 
@@ -137,27 +139,27 @@ def _load_fastsam() -> None:
     models_dir = os.path.abspath("models")
     os.makedirs(models_dir, exist_ok=True)
 
-    model_path = os.path.join(models_dir, model_name)
     device = _select_device("FASTSAM_DEVICE")
     logger.info(f"FastSAM | device: {device} | model: {model_name}")
 
-    _fastsam_model = FastSAM(model_path)
+    # Auto-downloads to models/ dir on first use
+    _fastsam_model = FastSAM(os.path.join(models_dir, model_name))
     logger.info("FastSAM ready")
 
 
 def _segment_fastsam(img: Image.Image) -> list[Segment]:
-    from ultralytics.models.fastsam import FastSAMPrompt
-
     assert _fastsam_model is not None
 
     W, H = img.size
-    conf = float(os.getenv("FASTSAM_CONF", "0.4"))
-    iou  = float(os.getenv("FASTSAM_IOU", "0.9"))
+    conf   = float(os.getenv("FASTSAM_CONF", "0.4"))
+    iou    = float(os.getenv("FASTSAM_IOU", "0.9"))
     device = _select_device("FASTSAM_DEVICE")
 
     logger.info(f"FastSAM: segmenting {W}x{H} image (conf={conf}, iou={iou})...")
 
-    results = _fastsam_model(
+    # Current ultralytics API: predict() returns results directly with masks.
+    # No FastSAMPrompt needed for the everything (all-regions) use case.
+    results = _fastsam_model.predict(
         img,
         device=device,
         retina_masks=True,
@@ -167,32 +169,21 @@ def _segment_fastsam(img: Image.Image) -> list[Segment]:
         verbose=False,
     )
 
-    prompt_process = FastSAMPrompt(img, results, device=device)
-    annotations = prompt_process.everything_prompt()
-
-    if annotations is None or len(annotations) == 0:
-        logger.info("FastSAM: no segments found")
-        return []
-
     segments = []
     total = W * H
 
-    for ann in annotations:
-        # ann is a boolean mask of shape (H, W)
-        import numpy as np
-        mask = ann.cpu().numpy() if hasattr(ann, "cpu") else np.array(ann)
-        rows = np.any(mask, axis=1)
-        cols = np.any(mask, axis=0)
-        if not rows.any():
+    for result in results:
+        if result.masks is None:
             continue
-        y1, y2 = np.where(rows)[0][[0, -1]]
-        x1, x2 = np.where(cols)[0][[0, -1]]
-        w, h = int(x2 - x1), int(y2 - y1)
-        area = int(mask.sum())
-        segments.append(Segment(
-            bbox=(x1 / W, y1 / H, w / W, h / H),
-            area=area / total,
-        ))
+        import numpy as np
+        for mask_tensor, box in zip(result.masks.data, result.boxes.xyxy.tolist()):
+            x1, y1, x2, y2 = box
+            w, h = x2 - x1, y2 - y1
+            area = float(mask_tensor.cpu().numpy().sum())
+            segments.append(Segment(
+                bbox=(x1 / W, y1 / H, w / W, h / H),
+                area=area / total,
+            ))
 
     logger.info(f"FastSAM: produced {len(segments)} segments")
     return sorted(segments, key=lambda s: s.area, reverse=True)
@@ -206,16 +197,15 @@ def _load_yoloe() -> None:
     global _yoloe_model
     from ultralytics import YOLOE
 
-    model_name = os.getenv("YOLOE_MODEL", "yoloe-11l-seg.pt")
+    model_name = os.getenv("YOLOE_MODEL", "yoloe-11l-seg-pf.pt")
     models_dir = os.path.abspath("models")
     os.makedirs(models_dir, exist_ok=True)
 
-    model_path = os.path.join(models_dir, model_name)
     device = _select_device("YOLOE_DEVICE")
     logger.info(f"YOLOE | device: {device} | model: {model_name}")
 
-    # YOLOE downloads automatically on first use if not found locally
-    _yoloe_model = YOLOE(model_path)
+    # Auto-downloads to models/ dir on first use
+    _yoloe_model = YOLOE(os.path.join(models_dir, model_name))
     logger.info("YOLOE ready")
 
 
@@ -223,23 +213,44 @@ def _segment_yoloe(img: Image.Image) -> list[Segment]:
     assert _yoloe_model is not None
 
     W, H = img.size
+    # Default conf is intentionally low — prompt-free mode needs a relaxed
+    # threshold to detect objects outside the standard COCO/LVIS distribution.
+    conf   = float(os.getenv("YOLOE_CONF", "0.005"))
+    iou    = float(os.getenv("YOLOE_IOU", "0.5"))
+    imgsz  = int(os.getenv("YOLOE_IMGSZ", "1280")) # 1920 if you have lots of memory!
     device = _select_device("YOLOE_DEVICE")
 
-    logger.info(f"YOLOE: segmenting {W}x{H} image in prompt-free mode...")
+    logger.info(f"YOLOE: segmenting {W}x{H} image (conf={conf}, iou={iou})...")
 
-    # Prompt-free inference: model uses its built-in 1200+ category vocabulary
-    results = _yoloe_model.predict(img, device=device, verbose=False)
+    results = _yoloe_model.predict(
+        img,
+        device=device,
+        conf=conf,
+        iou=iou,
+        imgsz=imgsz,
+        verbose=False,
+    )
 
     segments = []
     total = W * H
 
     for result in results:
         if result.masks is None:
+            # Fall back to bboxes if masks not available
+            if result.boxes is not None:
+                for box in result.boxes.xyxy.tolist():
+                    x1, y1, x2, y2 = box
+                    w, h = x2 - x1, y2 - y1
+                    segments.append(Segment(
+                        bbox=(x1 / W, y1 / H, w / W, h / H),
+                        area=(w * h) / total,
+                    ))
             continue
-        for mask_xy, box in zip(result.masks.xy, result.boxes.xyxy.tolist()):
+        for mask_tensor, box in zip(result.masks.data, result.boxes.xyxy.tolist()):
             x1, y1, x2, y2 = box
             w, h = x2 - x1, y2 - y1
-            area = w * h
+            import numpy as np
+            area = float(mask_tensor.cpu().numpy().sum())
             segments.append(Segment(
                 bbox=(x1 / W, y1 / H, w / W, h / H),
                 area=area / total,
