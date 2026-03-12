@@ -37,4 +37,5 @@ export interface AppState {
   getImageByName: (name: string) => ImageEntry | undefined;
   cacheSearchResults: (imageId: string, box: BoundingBox, results: SearchResult[]) => void;
   getSearchResults: (imageId: string, box: BoundingBox) => SearchResult[] | undefined;
+  performSearch: (imageId: string, box: BoundingBox, limit?: number) => Promise<SearchResult[]>;
 }

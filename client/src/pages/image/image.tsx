@@ -10,6 +10,7 @@ export const ImageView = () => {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const getImageByName = useStore((s) => s.getImageByName);
+  const performSearch = useStore((s) => s.performSearch);
 
   const decodedId = id ? decodeURIComponent(id) : null;
   const entry = decodedId ? getImageByName(decodedId) : null;
@@ -27,6 +28,7 @@ export const ImageView = () => {
 
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
   const [imageDims, setImageDims] = useState<{ w: number; h: number } | null>(null);
+  const [isSearching, setIsSearching] = useState(false);
   const imgRef = useRef<HTMLImageElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -194,13 +196,22 @@ export const ImageView = () => {
       {!highlightBox && dragState.box && (
         <div className="bg-gray-900 text-white p-4 flex justify-center gap-2">
           <Button
-            onClick={() => {
-              navigate(
-                `/search?imageId=${encodeURIComponent(decodedId!)}&box=${encodeBbox(dragState.box!)}`
-              );
+            disabled={isSearching}
+            onClick={async () => {
+              setIsSearching(true);
+              try {
+                await performSearch(decodedId!, dragState.box!);
+                navigate(
+                  `/search?imageId=${encodeURIComponent(decodedId!)}&box=${encodeBbox(dragState.box!)}`
+                );
+              } catch (err) {
+                console.error('Search failed:', err);
+              } finally {
+                setIsSearching(false);
+              }
             }}
           >
-            Search
+            {isSearching ? 'Searching...' : 'Search'}
           </Button>
           <Button variant="outline" onClick={() => setDragState({ isDrawing: false, start: null, current: null, box: null })}>
             Clear
