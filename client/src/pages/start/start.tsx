@@ -1,11 +1,21 @@
 import { Folder } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { useNavigate } from 'react-router-dom';
+import { useStore } from '@/store/store';
 
 export const Start = () => {
+  const navigate = useNavigate();
+  const loadFolder = useStore((s) => s.loadFolder);
 
-  const onOpenFolder = () => {
-
-  }
+  const onOpenFolder = async () => {
+    try {
+      const handle = await window.showDirectoryPicker();
+      await loadFolder(handle);
+      navigate('/gallery');
+    } catch (err) {
+      console.error('folder picker cancelled or failed', err);
+    }
+  };
 
   return (
     <main className="size-full flex items-center justify-center">
@@ -20,6 +30,5 @@ export const Start = () => {
         </div>
       </div>
     </main>
-  )
-
-}
+  );
+};
