@@ -1,6 +1,6 @@
 import { useStore } from '@/store/store';
 import type { ImageEntry } from '@/types';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { LazyImage } from './lazy-image';
 
@@ -34,9 +34,11 @@ export const Gallery = () => {
       </div>
       <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
         {images.map((img) => (
-          <div key={img.name} className="aspect-square">
-            <LazyImage entry={img} />
-          </div>
+          <Link key={img.name} to={`/image/${encodeURIComponent(img.name)}`}>
+            <div className="aspect-square cursor-pointer hover:opacity-75 transition-opacity">
+              <LazyImage entry={img} />
+            </div>
+          </Link>
         ))}
       </div>
     </main>

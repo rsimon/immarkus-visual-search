@@ -1,17 +1,19 @@
 import { create } from 'zustand';
-import type { ImageEntry, EmbeddingsHandles, AppState } from '@/types';
+import type { ImageEntry, EmbeddingsHandles, AppState, BoundingBox, SearchResult, SearchCache } from '@/types';
+import { encodeBbox } from '@/utils/url';
 
 export const useStore = create<AppState>((set, get) => ({
   folderHandle: null,
   images: [],
   embeddings: {},
+  searchCache: {},
 
   clear: () => {
     // revoke any object URLs we created
     get().images.forEach((img) => {
       if (img.url) URL.revokeObjectURL(img.url);
     });
-    set({ folderHandle: null, images: [], embeddings: {} });
+    set({ folderHandle: null, images: [], embeddings: {}, searchCache: {} });
   },
 
   loadFolder: async (handle: FileSystemDirectoryHandle) => {
@@ -48,5 +50,21 @@ export const useStore = create<AppState>((set, get) => ({
     const json = await jsonFile.text().then((t) => JSON.parse(t));
     const bin = await binFile.arrayBuffer();
     return { json, bin };
+  },
+
+  getImageByName: (name: string) => {
+    return get().images.find((img) => img.name === name);
+  },
+
+  cacheSearchResults: (imageId: string, box: BoundingBox, results: SearchResult[]) => {
+    const key = `${imageId}__${encodeBbox(box)}`;
+    set((state) => ({
+      searchCache: { ...state.searchCache, [key]: results },
+    }));
+  },
+
+  getSearchResults: (imageId: string, box: BoundingBox) => {
+    const key = `${imageId}__${encodeBbox(box)}`;
+    return get().searchCache[key];
   },
 }));
