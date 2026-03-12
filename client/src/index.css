@@ -123,3 +123,9 @@
     @apply bg-background text-foreground;
   }
 }
+
+html, body, #app {
+  margin: 0;
+  height: 100%;
+  padding: 0;
+}
